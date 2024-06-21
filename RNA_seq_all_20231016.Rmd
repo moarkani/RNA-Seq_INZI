@@ -1,0 +1,333 @@
+---
+title: "RNA_seq_all_20230318"
+author: "M.Arkani"
+date: "2023-03-18"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+# TODO
+
+# Loading libraries
+
+```{r setup,message=FALSE,warning=FALSE}
+library( tidyverse )
+library( edgeR )
+source( "./diffexpr20/R/diffexpr20.R" )
+source( "./diffexpr20/R/std_de_tools.R" )
+source( "./diffexpr20/R/gentrap_experiment.R" )
+```
+
+```{r}
+
+
+writeTable <- function( d, file, dirLevels = c() ) {
+  path <- paste( c( "sasc425-results", dirLevels ), collapse = "/" )
+  dir.create( path, recursive = TRUE )
+  write.csv( d, file = paste0( path, "/", file ) )
+}
+```
+
+# Loading data
+
+```{r}
+load( "sasc425.rda" )
+```
+
+# Sample sheet
+
+```{r}
+getSamplesData( gte )
+nrow(gte$samplesData)
+```
+
+# Plotting distribution of counts
+
+```{r warning=FALSE}
+countsPerSampleBoxPlot( gte, x = rlang::quo( sample ) )
+```
+
+# Removing low-expressed genes and non-protein-coding genes
+
+```{r}
+dge <- convertToDGEList( gte )
+dim( dge )
+```
+
+# M1 selection
+```{r}
+# dge <- dge[,colnames(dge)[dge$samples$Cell_Type== "M1"]] 
+# dge$samples <- droplevels(dge$samples)
+# summary(as.factor(dge$samples$Group))
+```
+
+
+
+```{r}
+if( 0 ) {
+  # TODO: extract biotype and filter by it
+  getFeaturesData( gte )
+}
+```
+
+
+```{r}
+designSelFeatures <- model.matrix( ~ Group, data = dge$samples )
+selFeatures <- edgeR::filterByExpr( dge, designSelFeatures, min.total.count = 1000 )
+#dge <- dge[ selFeatures, , keep.lib.sizes = TRUE ]
+dge <- dge[ selFeatures, , keep.lib.sizes = FALSE ]
+dim( dge )
+```
+
+
+
+
+# Normalization for library sizes
+
+```{r}
+dge <- edgeR::calcNormFactors( dge, method = "TMM" )
+refDge <- refExp( dge, gte )
+```
+
+```{r}
+#writeTable( getCountsMatrix( dge ), "CPM.csv" )
+```
+
+# Plotting distributions of normalized counts
+
+## For all features
+
+```{r message=FALSE,warning=FALSE}
+countsPerSampleDensityPlot( refDge, color = rlang::quo( subject ) ) +
+  facet_grid( Infection ~ Cell_Type, labeller = label_both )
+```
+
+```{r message=FALSE,warning=FALSE}
+countsPerSampleBoxPlot( refDge, x = rlang::quo( sample ), color = rlang::quo( subject ) ) +
+  facet_grid( ~ Group, scales = "free_x" )
+```
+
+```{r fig.width=10,fig.height=10}
+countsPerSampleHeatmap( 
+  refDge, topGenesNum = 200,
+  xVar = "sample",
+  orderBy = "sd"
+)
+```
+
+### Relations of averages in sample groups
+
+```{r fig.width=12,fig.height=12}
+m <- summarizeSamplesCountsMatrix( refDge, Group )
+pairs( m, log = "xy", pch = ".", lower.panel = NULL, main = getUnitInfo( m, "count" )$unit )
+```
+
+## For all features on chromosome Y. (Not Applicable)
+
+```{r message=FALSE,warning=FALSE,eval=FALSE}
+# countsPerSampleBoxPlot( 
+#   refExp( dge, gte ), 
+#   x = rlang::quo( sample ), 
+#   features = getClassFeatures( refExp( dge, gte ), "Y" ),
+#   color = rlang::quo( subject )
+# )
+```
+
+# Plotting PCA
+
+```{r}
+countsPCA <- calcCountsPCA( refExp( dge, gte ) )
+```
+
+```{r}
+explainedVariancePCAPlot( countsPCA )
+```
+
+```{r}
+pointsPCAPlot( countsPCA, color = quo( subject ), label = quo( sample ) )
+```
+
+```{r}
+pointsPCAPlot( countsPCA, color = quo( Cell_Type ), label = quo( subject ) )
+```
+
+```{r}
+pointsPCAPlot( countsPCA, color = quo( Infection ), label = quo( subject ) )
+```
+
+# Tuberculosis
+
+```{r warning=FALSE}
+# tb <- getCountsData( gte ) %>% filter( feature == "AllTuberculosis" )
+# tb <- tb %>% left_join( dge$samples, by = "sample" )
+# p <- ggplot( tb ) + aes( x = Group, y = count / on_feature ) +
+#   geom_boxplot( outlier.colour = NA ) + 
+#   geom_jitter( width = 0.2, aes( color = subject ) ) +
+#   theme_bw() +
+#   scale_y_log10( name = "TB_reads / all_aligned_reads" )
+# ggsave( p, filename = "tbreads.png", width = 7, height = 7 )
+# p
+```
+
+
+# Differential gene expression analyses (edgeR)
+
+
+
+## Definition of the analysis process (case-control)
+
+```{r}
+edgeRAnalysis <- function( dge, gte ) {
+  
+  group <- factor(paste0(dge$samples$Infection, "_", dge$samples$Cell_Type))
+
+  # Design matrix
+  design <- model.matrix(~ 0 + group)
+  colnames(design) <- levels(group)
+
+  ss <- getSamplesData( refExp( dge, gte ) )
+
+  edgeRDge <- dge[ , as.character( ss$sample ) ]
+  edgeRDge <- estimateDisp( edgeRDge, design = design, robust = TRUE )
+  
+  #plotBCV( edgeRDge )
+  
+  edgeRFit <- glmFit( edgeRDge, design ) #fitting the model
+  
+  #M1: Mtb vs. Ctrl
+  # contrast <- makeContrasts( Mtb_M1 - Ctrl_M1, levels=design)  # define the contrast (M1: MtbvsCtrl)
+  # #M2: Mtb vs. Ctrl
+  # contrast <- makeContrasts( Mtb_M1 - Ctrl_M1, levels=design)  # define the contrast (M2: MtbvsCtrl)
+  # #All: Mtb vs. Ctrl
+  contrast <- makeContrasts( (Mtb_M1+Mtb_M2) - (Ctrl_M1+Ctrl_M2), levels=design)  # define the contrast (All: MtbvsCtrl)
+  
+
+  
+  edgeRLrt <- glmLRT( edgeRFit, contrast = contrast )  #Likelihood Ratio
+  
+  edgeRTT <- asDETable( topTags( edgeRLrt, n = Inf ) )
+  #writeTable( edgeRTT, "de-edger.csv", dirLevels = cf )
+  
+  edgeRFeatures <- edgeRTT %>% 
+    distinct( feature, adjPValue ) %>% arrange( adjPValue ) %>% pull( feature )
+  list(
+    gte = gte,
+    dge = edgeRDge,
+    topTags = edgeRTT,
+    topFeatures = edgeRFeatures
+  )
+}
+```
+
+
+```{r}
+origins <- c( all = "all" )
+edgeRAllAnalyses <- lapply( 
+  origins, function( origin ) edgeRAnalysis( dge, gte ) 
+)
+```
+
+
+
+## Numbers of differentially expressed genes (case-control) --> 5967 by adPvalue <0.05
+
+```{r}
+lapply( edgeRAllAnalyses, function( a ) sum( a$topTags$adjPVal < 0.05 ) )
+```
+
+
+
+
+## Detailed comparison of averages between groups (case-control)
+
+```{r fig.width=5,fig.height=5}
+for( na in names( edgeRAllAnalyses ) ) {
+  a <- edgeRAllAnalyses[[ na ]]
+  topFeatures <-  a$topTags$feature[ a$topTags$adjPVal < 0.05 ]
+  m <- summarizeSamplesCountsMatrix( refExp( a$dge, a$gte ), Infection )
+  pairs(
+    m, log = "xy", pch = ".", lower.panel = NULL,
+    main = paste0( na, " [", getUnitInfo( m, "count" )$unit, "]" ),
+    col = ifelse( rownames( m ) %in% topFeatures, "red", "gray" )
+  )
+}
+```
+
+
+
+## Distribution of raw p-values (case-control)
+
+```{r}
+for( a in edgeRAllAnalyses ) print( pValueHistogram( a$topTags ) )
+```
+
+
+
+
+## Top deregulated genes (case-control)
+
+```{r warning=FALSE,fig.width=14,fig.height=5}
+for( a in edgeRAllAnalyses ) print( 
+  countsPerFeatureBoxPlot( 
+    refExp( a$dge, a$gte ), geom = "point",
+    features = head( a$topFeatures, 100 ), 
+    color = "Infection", fill = "Infection", x = "gene_name"
+  )
+)
+```
+
+
+
+
+###Labeling Sign Genes
+```{r}
+#Define Sign and Non-Sign genes as a new a col in Gene Table
+all_RNAseq_DifExp <- edgeRAllAnalyses$all$topTags %>%
+  mutate(DiffExpressed = if_else(adjPValue < 0.05, "Sign", "Non-Sign"))
+
+write.csv(all_RNAseq_DifExp, file = "all_RNAseq_DifExp.csv")
+
+```
+
+
+
+## Volcano plot
+```{r, echo=FALSE, results='asis', warning=FALSE}
+
+VolcPlot <- ggplot(all_RNAseq_DifExp) +
+  aes(x=log2FC, y=-log10(adjPValue), col=DiffExpressed) +
+  geom_point(alpha = 0.6, size= 2) + 
+  # xlim(-2.9,2.9) +
+  theme_bw()
+ggsave("all_RNA_Seq_VolcPlot.pdf", VolcPlot)
+
+VolcPlot
+
+```
+
+
+
+
+###Adding "hgnc_symbol" to the gene table
+```{r}
+
+all_RNAseq_DifExp_Final <- all_RNAseq_DifExp
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+all_RNAseq_DifExp_Final$geneSymbol = mapIds(org.Hs.eg.db,
+                    keys=all_RNAseq_DifExp_Final$feature, 
+                    column="SYMBOL",
+                    keytype="ENSEMBL",
+                    multiVals="first")
+nrow(filter(all_RNAseq_DifExp_Final, is.na(geneSymbol)))
+
+# Save as scv file
+write.csv(all_RNAseq_DifExp_Final, file = "all_RNAseq_DifExp_Final.csv")
+
+```
+
+
+
+
